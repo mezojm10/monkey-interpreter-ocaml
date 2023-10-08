@@ -1,0 +1,4 @@
+(executable
+ (public_name monkey_interpreter)
+ (name main)
+ (libraries monkey_interpreter))
