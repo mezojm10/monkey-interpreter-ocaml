@@ -1,38 +1,38 @@
 type t =
-  | ILLEGAL
+  | Illegal
   (* delimiters *)
-  | LEFT_SQUIRLY
-  | RIGHT_SQUIRLY
-  | LEFT_BRACKET
-  | RIGHT_BRACKET
-  | LEFT_PAREN
-  | RIGHT_PAREN
-  | SEMICOLON
-  | COLON
-  | COMMA
+  | Left_squirly
+  | Right_squirly
+  | Left_bracket
+  | Right_bracket
+  | Left_paren
+  | Right_paren
+  | Semicolon
+  | Colon
+  | Comma
   (* keywords *)
-  | FUNCTION
-  | LET
-  | RETURN
-  | IF
-  | ELSE
-  | TRUE
-  | FALSE
+  | Function
+  | Let
+  | Return
+  | If
+  | Else
+  | True
+  | False
   (* operators *)
-  | GREATER_THAN
-  | LESS_THAN
-  | EQUALS
-  | NOT_EQUALS
-  | ASSIGN
-  | NOT
-  | MINUS
-  | PLUS
-  | PRODUCT
-  | DIVISION
+  | Greater_than
+  | Less_than
+  | Equals
+  | Not_equals
+  | Assign
+  | Not
+  | Minus
+  | Plus
+  | Product
+  | Division
   (* identifiers + literals *)
-  | IDENT of string
-  | INTEGER of string
-  | STRING of string
+  | Ident of string
+  | Integer of string
+  | String of string
 
 val lookup_ident : string -> t
 val pp : Format.formatter -> t -> unit

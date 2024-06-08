@@ -1,6 +1,12 @@
 (library
  (name monkey_interpreter)
- (libraries base stdio)
- (preprocess (pps ppx_deriving.show ppx_deriving.eq ppx_inline_test ppx_assert))
- (inline_tests)
- )
+ (libraries base stdio fmt)
+ (preprocess
+  (pps
+   ppx_deriving.show
+   ppx_deriving.eq
+   ppx_deriving.ord
+   ppx_inline_test
+   ppx_assert
+   ppx_expect))
+ (inline_tests))

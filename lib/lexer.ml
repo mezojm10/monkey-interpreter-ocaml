@@ -14,7 +14,7 @@ and read_char l =
   then { l with ch = None }
   else (
     let ch = Some l.input.[l.read_position] in
-    { ch; read_position = l.read_position + 1; input = l.input })
+    { l with ch; read_position = l.read_position + 1 })
 ;;
 
 let peek_char l =
@@ -56,7 +56,7 @@ let rec read_integer_aux l aux =
 
 let read_integer l =
   let l, int_lit = read_integer_aux l "" in
-  l, Token.INTEGER int_lit
+  l, Token.Integer int_lit
 ;;
 
 (** Just keeps reading until the terminating ['"'] or reaching EOF *)
@@ -64,14 +64,14 @@ let rec read_string_aux l aux =
   match l.ch with
   | None -> l, None
   | Some c when Char.(c <> '"') -> aux ^ Char.to_string c |> read_string_aux (read_char l)
-  | Some _ -> l, Some (Token.STRING aux)
+  | Some _ -> l, Some (Token.String aux)
 ;;
 
 let read_string l =
   let l = read_char l in
   match read_string_aux l "" with
   (* If None was returned, that means we reached EOF without the string being terminated *)
-  | l, None -> l, Token.ILLEGAL
+  | l, None -> l, Token.Illegal
   | l, Some token -> read_char l, token
 ;;
 
@@ -84,33 +84,33 @@ let next_token l =
   | Some ch ->
     let l, token =
       match ch with
-      | '[' -> read_char l, LEFT_BRACKET
-      | ']' -> read_char l, RIGHT_BRACKET
-      | '(' -> read_char l, LEFT_PAREN
-      | ')' -> read_char l, RIGHT_PAREN
-      | '{' -> read_char l, LEFT_SQUIRLY
-      | '}' -> read_char l, RIGHT_SQUIRLY
-      | ':' -> read_char l, COLON
-      | ';' -> read_char l, SEMICOLON
-      | ',' -> read_char l, COMMA
-      | '+' -> read_char l, PLUS
-      | '-' -> read_char l, MINUS
-      | '*' -> read_char l, PRODUCT
-      | '/' -> read_char l, DIVISION
-      | '<' -> read_char l, LESS_THAN
-      | '>' -> read_char l, GREATER_THAN
+      | '[' -> read_char l, Left_bracket
+      | ']' -> read_char l, Right_bracket
+      | '(' -> read_char l, Left_paren
+      | ')' -> read_char l, Right_paren
+      | '{' -> read_char l, Left_squirly
+      | '}' -> read_char l, Right_squirly
+      | ':' -> read_char l, Colon
+      | ';' -> read_char l, Semicolon
+      | ',' -> read_char l, Comma
+      | '+' -> read_char l, Plus
+      | '-' -> read_char l, Minus
+      | '*' -> read_char l, Product
+      | '/' -> read_char l, Division
+      | '<' -> read_char l, Less_than
+      | '>' -> read_char l, Greater_than
       | '=' ->
         (match peek_char l with
-         | Some ch when Char.(ch = '=') -> read_char (read_char l), EQUALS
-         | _ -> read_char l, ASSIGN)
+         | Some ch when Char.(ch = '=') -> read_char (read_char l), Equals
+         | _ -> read_char l, Assign)
       | '!' ->
         (match peek_char l with
-         | Some ch when Char.(ch = '=') -> read_char (read_char l), NOT_EQUALS
-         | _ -> read_char l, NOT)
+         | Some ch when Char.(ch = '=') -> read_char (read_char l), Not_equals
+         | _ -> read_char l, Not)
       | '"' -> read_string l
       | ch when Char.is_alpha ch -> read_identifier l
       | ch when Char.is_digit ch -> read_integer l
-      | _ -> l, ILLEGAL
+      | _ -> l, Illegal
     in
     l, Some token
 ;;
@@ -142,58 +142,57 @@ let%test "Test lexing" =
     }
   |}
   in
-  List.iter ~f:(fun t -> Stdio.print_endline @@ Token.show t) tokens;
   tokens
   |> List.equal (fun a b -> Token.equal a b)
      @@
      let open Token in
-     [ LET
-     ; IDENT "x"
-     ; ASSIGN
-     ; INTEGER "69420"
-     ; DIVISION
-     ; INTEGER "96"
-     ; SEMICOLON
-     ; STRING "this is a string"
-     ; SEMICOLON
-     ; NOT
-     ; LEFT_PAREN
-     ; INTEGER "1"
-     ; GREATER_THAN
-     ; INTEGER "2"
-     ; RIGHT_PAREN
-     ; NOT_EQUALS
-     ; LEFT_PAREN
-     ; INTEGER "3"
-     ; LESS_THAN
-     ; INTEGER "1"
-     ; RIGHT_PAREN
-     ; SEMICOLON
-     ; LEFT_BRACKET
-     ; INTEGER "1"
-     ; PRODUCT
-     ; INTEGER "2"
-     ; PLUS
-     ; INTEGER "1"
-     ; COMMA
-     ; INTEGER "2"
-     ; MINUS
-     ; INTEGER "1"
-     ; RIGHT_BRACKET
-     ; SEMICOLON
-     ; IF
-     ; LEFT_PAREN
-     ; IDENT "some"
-     ; EQUALS
-     ; TRUE
-     ; RIGHT_PAREN
-     ; LEFT_SQUIRLY
-     ; RETURN
-     ; IDENT "x"
-     ; RIGHT_SQUIRLY
-     ; ELSE
-     ; LEFT_SQUIRLY
-     ; IDENT "y"
-     ; RIGHT_SQUIRLY
+     [ Let
+     ; Ident "x"
+     ; Assign
+     ; Integer "69420"
+     ; Division
+     ; Integer "96"
+     ; Semicolon
+     ; String "this is a string"
+     ; Semicolon
+     ; Not
+     ; Left_paren
+     ; Integer "1"
+     ; Greater_than
+     ; Integer "2"
+     ; Right_paren
+     ; Not_equals
+     ; Left_paren
+     ; Integer "3"
+     ; Less_than
+     ; Integer "1"
+     ; Right_paren
+     ; Semicolon
+     ; Left_bracket
+     ; Integer "1"
+     ; Product
+     ; Integer "2"
+     ; Plus
+     ; Integer "1"
+     ; Comma
+     ; Integer "2"
+     ; Minus
+     ; Integer "1"
+     ; Right_bracket
+     ; Semicolon
+     ; If
+     ; Left_paren
+     ; Ident "some"
+     ; Equals
+     ; True
+     ; Right_paren
+     ; Left_squirly
+     ; Return
+     ; Ident "x"
+     ; Right_squirly
+     ; Else
+     ; Left_squirly
+     ; Ident "y"
+     ; Right_squirly
      ]
 ;;
