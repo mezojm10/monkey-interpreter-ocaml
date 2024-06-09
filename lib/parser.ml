@@ -53,27 +53,11 @@ and parse_statement parser =
   match parser.curToken with
   | Some Token.Let -> parse_let (next_token parser)
   | Some Token.Return -> parse_return (next_token parser)
+  | Some Token.Left_squirly -> parse_block_statement parser
   | Some _ -> parse_expression_statement parser
   | _ ->
     Stdio.print_endline (Token.show (Option.value_exn parser.curToken));
     failwith "end"
-
-and parse_let parser =
-  let* parser, ident = parse_ident parser in
-  let* parser = expect_assign parser in
-  let* parser, expr = parse_expr (next_token parser) `LOWEST in
-  let parser = chomp_semicolon parser in
-  Ok (parser, Ast.Let { name = ident; value = expr })
-
-and parse_return parser =
-  let* parser, expr = parse_expr parser `LOWEST in
-  let parser = chomp_semicolon parser in
-  Ok (parser, Ast.Return expr)
-
-and parse_expression_statement parser =
-  let* parser, expr = parse_expr parser `LOWEST in
-  let parser = chomp_semicolon parser in
-  Ok (parser, Ast.ExpressionStatement expr)
 
 and parse_expr parser precedence =
   (* Fmt.pr "parsing expression: %s\n" (Token.show (Option.value_exn parser.curToken)); *)
@@ -94,25 +78,52 @@ and parse_expr parser precedence =
   in
   loop parser left_exp
 
-and peek_precedence parser =
-  match parser.nextToken with
-  | Some tok -> get_precedence tok
-  | None -> `LOWEST
+and parse_let parser =
+  let* parser, ident = parse_ident parser in
+  let* parser = expect parser Token.Assign in
+  let* parser, expr = parse_expr (next_token parser) `LOWEST in
+  let parser = chomp_semicolon parser in
+  Ok (parser, Ast.Let { name = ident; value = expr })
 
-and peek_token_is parser token =
-  match parser.nextToken with
-  | Some tok -> Token.equal token tok
-  | None -> false
+and parse_return parser =
+  let* parser, expr = parse_expr parser `LOWEST in
+  let parser = chomp_semicolon parser in
+  Ok (parser, Ast.Return expr)
 
-and expr_parse_ident parser =
-  match parser.curToken with
-  | Some (Token.Ident identifier) -> Ok (parser, Ast.Identifier { identifier })
-  | _ -> Error "Expected to read identifier"
+and parse_block_statement parser =
+  let* parser, statements = parse_block parser in
+  Ok (parser, Ast.BlockStatement { statements })
 
-and expect_assign parser =
+and parse_block parser =
+  let* parser =
+    match parser.curToken with
+    | Some Token.Left_squirly -> Ok (next_token parser)
+    | Some t -> Error (Fmt.str "Expected {, got: %s" (Token.show t))
+    | None -> Error "Expected {, got EOF"
+  in
+  let rec loop parser statements =
+    match parser.curToken with
+    | Some Token.Right_squirly -> Ok (parser, List.rev statements)
+    | Some _ ->
+      (match parse_statement parser with
+       | Ok (parser, stmt) -> loop (next_token parser) (stmt :: statements)
+       | Error msg -> Error (Fmt.str "Something went wrong: %s" msg))
+    | None -> Error "Expected }, got EOF"
+  in
+  let* parser, statements = loop parser [] in
+  Ok (parser, statements)
+
+and parse_expression_statement parser =
+  let* parser, expr = parse_expr parser `LOWEST in
+  let parser = chomp_semicolon parser in
+  Ok (parser, Ast.ExpressionStatement expr)
+
+and expect parser expected =
   match parser.nextToken with
-  | Some Token.Assign -> Ok (next_token parser)
-  | _ -> Error "Expected ="
+  | Some token when Token.equal token expected -> Ok (next_token parser)
+  | Some token ->
+    Error (Fmt.str "Expected %s, got: %s" (Token.show expected) (Token.show token))
+  | None -> Error (Fmt.str "Expected %s, got: EOF" (Token.show expected))
 
 and chomp_semicolon parser =
   match parser.nextToken with
@@ -126,9 +137,12 @@ and prefix_parse parser =
   let* parser, expr =
     match parser.curToken with
     | Some (Token.Ident _) -> expr_parse_ident parser
-    | Some (Token.Integer _) -> parse_integer parser
+    | Some (Token.Integer _) -> expr_parse_integer parser
+    | Some (Token.String _) -> expr_parse_string parser
     | Some (Token.True | Token.False) -> expr_parse_bool parser
     | Some ((Token.Not | Token.Minus) as op) -> expr_parse_prefix (next_token parser) op
+    | Some Token.Left_paren -> expr_parse_grouped (next_token parser)
+    | Some Token.If -> expr_parse_if parser
     | Some tok ->
       Error (Fmt.str "Invalid expression, expected prefix, got %s" (Token.show tok))
     | _ -> Error "Invalid expression"
@@ -156,18 +170,44 @@ and expr_parse_prefix parser op =
   let* parser, expr = parse_expr parser `PREFIX in
   Ok (parser, Ast.Prefix { operator = op; right = expr })
 
+and expr_parse_grouped parser =
+  let* parser, expr = parse_expr parser `LOWEST in
+  let* parser = expect parser Token.Right_paren in
+  Ok (parser, Ast.GroupedExpression expr)
+
 and expr_parse_infix parser ~op ~left =
   (* Fmt.pr "parsing infix operator: %s\n" (Token.show (Option.value_exn parser.curToken)); *)
   let precedence = get_precedence op in
   let* parser, right = parse_expr (next_token parser) precedence in
   Ok (parser, Ast.Infix { left; operator = op; right })
 
+and expr_parse_if parser =
+  let* parser = expect parser Token.Left_paren in
+  let* parser, condition = parse_expr (next_token parser) `LOWEST in
+  let* parser = expect parser Token.Right_paren in
+  let* parser, consequence = parse_block (next_token parser) in
+  let* parser, alternative = parse_else parser in
+  Ok (parser, Ast.IfExpression { condition; consequence; alternative })
+
+and parse_else parser =
+  match parser.nextToken with
+  | Some Token.Else ->
+    let* parser = expect (next_token parser) Token.Left_squirly in
+    let* parser, alternative = parse_block parser in
+    Ok (parser, Some alternative)
+  | _ -> Ok (parser, None)
+
 and parse_ident parser =
   match parser.curToken with
   | Some (Token.Ident identifier) -> Ok (parser, Ast.{ identifier })
   | _ -> Error "Expected to read identifier"
 
-and parse_integer parser =
+and expr_parse_ident parser =
+  match parser.curToken with
+  | Some (Token.Ident identifier) -> Ok (parser, Ast.Identifier { identifier })
+  | _ -> Error "Expected to read identifier"
+
+and expr_parse_integer parser =
   match parser.curToken with
   | Some (Token.Integer integer) ->
     (match Int.of_string_opt integer with
@@ -176,15 +216,31 @@ and parse_integer parser =
   | Some t -> Error (Fmt.str "Expected Token.Integer, found: %s" (Token.show t))
   | None -> Error "Reached end of file, but was expecting integer"
 
+and expr_parse_string parser =
+  match parser.curToken with
+  | Some (Token.String string) -> Ok (parser, Ast.String string)
+  | Some t -> Error (Fmt.str "Expected Token.String, found: %s" (Token.show t))
+  | None -> Error "Reached end of file, but was expecting integer"
+
 and expr_parse_bool parser =
   match parser.curToken with
   | Some Token.True -> Ok (parser, Ast.Boolean true)
   | Some Token.False -> Ok (parser, Ast.Boolean false)
   | Some t -> Error (Fmt.str "Expected a boolean, found %s" (Token.show t))
   | None -> Error "Reached end of file, but was expecting boolean"
+
+and peek_precedence parser =
+  match parser.nextToken with
+  | Some tok -> get_precedence tok
+  | None -> `LOWEST
+
+and peek_token_is parser token =
+  match parser.nextToken with
+  | Some tok -> Token.equal token tok
+  | None -> false
 ;;
 
-let string_of_statement stmt expression_to_string =
+let rec string_of_statement stmt expression_to_string =
   match stmt with
   | Ast.Let stmt ->
     Fmt.str
@@ -193,11 +249,11 @@ let string_of_statement stmt expression_to_string =
       (expression_to_string stmt.value)
   | Ast.Return expr -> Fmt.str "RETURN: return %s" (expression_to_string expr)
   | Ast.ExpressionStatement expr -> Fmt.str "EXPR: %s" (expression_to_string expr)
+  | Ast.BlockStatement { statements } ->
+    List.fold statements ~init:"BLOCK: {\n" ~f:(fun acc stmt ->
+      Fmt.str "%s@." acc ^ string_of_statement stmt expression_to_string)
+    ^ "\n}"
 ;;
-
-(* (show_expression stmt.value) *)
-
-(* and string_of_ident ident = Ast.(ident.identifier) *)
 
 let print_node node expression_to_string =
   match node with
@@ -227,6 +283,14 @@ module Tests = struct
     let foobar = 838383;
     let foo = true;
     let bar = false;
+    let name = "John";
+    if (x == y){
+      let x = 3;
+      let y = 4;
+    } else {
+      let x = 0;
+      let y = 0;
+    }
   |}
     in
     expect_program input Ast.show_expression;
@@ -238,6 +302,17 @@ module Tests = struct
        LET: let { identifier = "foobar" } = (Integer 838383)
        LET: let { identifier = "foo" } = (Boolean true)
        LET: let { identifier = "bar" } = (Boolean false)
+       LET: let { identifier = "name" } = (String "John")
+       EXPR: IfExpression {
+        condition =
+        Infix {left = (Identifier { identifier = "x" }); operator = Token.Equals;
+          right = (Identifier { identifier = "y" })};
+        consequence =
+        [Let {name = { identifier = "x" }; value = (Integer 3)};
+          Let {name = { identifier = "y" }; value = (Integer 4)}];
+        alternative =
+        (Some [Let {name = { identifier = "x" }; value = (Integer 0)};
+                Let {name = { identifier = "y" }; value = (Integer 0)}])}
       ]
       |}]
   ;;
@@ -247,6 +322,7 @@ module Tests = struct
     return 5;
     return true;
     return x;
+    return "Test";
   |} in
     expect_program input Ast.show_expression;
     [%expect
@@ -255,6 +331,7 @@ module Tests = struct
        RETURN: return (Integer 5)
        RETURN: return (Boolean true)
        RETURN: return (Identifier { identifier = "x" })
+       RETURN: return (String "Test")
       ]
       |}]
   ;;
@@ -367,6 +444,10 @@ module Tests = struct
     5 > 4 == false;
     5 < 4 == true
     3 + 4 * 5 == 3 * 1 + 4 * 5;
+    (a + b) * c;
+    1 + (2 + 3) + 4;
+    2 / (5 + 5);
+    -(5 + 5);
     |}
     in
     expect_program input Ast.expression_to_string;
@@ -388,6 +469,10 @@ module Tests = struct
        EXPR: ((5>4)==false)
        EXPR: ((5<4)==true)
        EXPR: ((3+(4*5))==((3*1)+(4*5)))
+       EXPR: ((a+b)*c)
+       EXPR: ((1+(2+3))+4)
+       EXPR: (2/(5+5))
+       EXPR: (-(5+5))
       ]
       |}]
   ;;
