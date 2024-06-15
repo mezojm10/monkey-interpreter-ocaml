@@ -18,6 +18,7 @@ let get_precedence = function
   | Token.Less_than | Token.Greater_than -> `LESSGREATER
   | Token.Plus | Token.Minus -> `SUM
   | Token.Product | Token.Division -> `PRODUCT
+  | Token.Left_paren -> `CALL
   | _ -> `LOWEST
 ;;
 
@@ -91,10 +92,10 @@ and parse_return parser =
   Ok (parser, Ast.Return expr)
 
 and parse_block_statement parser =
-  let* parser, statements = parse_block parser in
-  Ok (parser, Ast.BlockStatement { statements })
+  let* parser, block = parse_block parser in
+  Ok (parser, Ast.BlockStatement block)
 
-and parse_block parser =
+and parse_block parser : (t * Ast.block_stmt, string) Result.t =
   let* parser =
     match parser.curToken with
     | Some Token.Left_squirly -> Ok (next_token parser)
@@ -111,7 +112,7 @@ and parse_block parser =
     | None -> Error "Expected }, got EOF"
   in
   let* parser, statements = loop parser [] in
-  Ok (parser, statements)
+  Ok (parser, Ast.{ statements })
 
 and parse_expression_statement parser =
   let* parser, expr = parse_expr parser `LOWEST in
@@ -143,6 +144,7 @@ and prefix_parse parser =
     | Some ((Token.Not | Token.Minus) as op) -> expr_parse_prefix (next_token parser) op
     | Some Token.Left_paren -> expr_parse_grouped (next_token parser)
     | Some Token.If -> expr_parse_if parser
+    | Some Token.Function -> expr_parse_function parser
     | Some tok ->
       Error (Fmt.str "Invalid expression, expected prefix, got %s" (Token.show tok))
     | _ -> Error "Invalid expression"
@@ -164,6 +166,7 @@ and infix_parse parser =
        | Token.Less_than
        | Token.Equals
        | Token.Not_equals ) as op) -> Some (expr_parse_infix, op)
+  | Some (Token.Left_paren as op) -> Some (expr_parse_call, op)
   | _ -> None
 
 and expr_parse_prefix parser op =
@@ -180,6 +183,42 @@ and expr_parse_infix parser ~op ~left =
   let precedence = get_precedence op in
   let* parser, right = parse_expr (next_token parser) precedence in
   Ok (parser, Ast.Infix { left; operator = op; right })
+
+and parse_params parser =
+  let rec loop parser params =
+    match parser.nextToken with
+    | Some Token.Right_paren -> Ok (parser, List.rev params)
+    | Some (Token.Ident identifier) ->
+      loop (next_token parser) (Ast.{ identifier } :: params)
+    | Some Token.Comma -> loop (next_token parser) params
+    | Some tok ->
+      Error (Fmt.str "Unexpected token found in function literal: %s" (Token.show tok))
+    | None -> Error "Reached EOF when parsing function literal"
+  in
+  loop parser []
+
+and expr_parse_function parser =
+  let* parser = expect parser Token.Left_paren in
+  let* parser, params = parse_params parser in
+  let* parser = expect parser Token.Right_paren in
+  let* parser, body = parse_block (next_token parser) in
+  Ok (parser, Ast.FunctionLiteral { params; body })
+
+and parse_arguments parser =
+  let rec loop parser args =
+    match parser.nextToken with
+    | Some Token.Right_paren -> Ok (next_token parser, List.rev args)
+    | Some Token.Comma -> loop (next_token parser) args
+    | Some _ ->
+      let* parser, expr = parse_expr (next_token parser) `LOWEST in
+      expr :: args |> loop parser
+    | None -> Error "Reached EOF when parsing call expression"
+  in
+  loop parser []
+
+and expr_parse_call parser ~op:_op ~left =
+  let* parser, arguments = parse_arguments parser in
+  Ok (parser, Ast.CallExpression { fn = left; arguments })
 
 and expr_parse_if parser =
   let* parser = expect parser Token.Left_paren in
@@ -240,38 +279,13 @@ and peek_token_is parser token =
   | None -> false
 ;;
 
-let rec string_of_statement stmt expression_to_string =
-  match stmt with
-  | Ast.Let stmt ->
-    Fmt.str
-      "LET: let %s = %s"
-      (Ast.show_identifier stmt.name)
-      (expression_to_string stmt.value)
-  | Ast.Return expr -> Fmt.str "RETURN: return %s" (expression_to_string expr)
-  | Ast.ExpressionStatement expr -> Fmt.str "EXPR: %s" (expression_to_string expr)
-  | Ast.BlockStatement { statements } ->
-    List.fold statements ~init:"BLOCK: {\n" ~f:(fun acc stmt ->
-      Fmt.str "%s@." acc ^ string_of_statement stmt expression_to_string)
-    ^ "\n}"
-;;
-
-let print_node node expression_to_string =
-  match node with
-  | Ast.Program program ->
-    Fmt.pr "Program: [@.";
-    List.iter program.statements ~f:(fun s ->
-      Fmt.pr " %s@." (string_of_statement s expression_to_string));
-    Fmt.pr "]@."
-  | _ -> failwith "oops"
-;;
-
 module Tests = struct
-  let expect_program input expression_to_string =
+  let expect_program input =
     let lexer = Lexer.init input in
     let parser = init lexer in
     let program = parse parser in
     match program with
-    | Ok program -> print_node program expression_to_string
+    | Ok program -> Ast.pp_node Stdlib.Format.std_formatter program
     | Error msg -> Stdio.print_endline msg
   ;;
 
@@ -291,48 +305,89 @@ module Tests = struct
       let x = 0;
       let y = 0;
     }
+    fn() { return false; }
+    fn(x) { return x; }
+    fn(x, y) { x + y; }
   |}
     in
-    expect_program input Ast.show_expression;
+    expect_program input;
     [%expect
       {|
-      Program: [
-       LET: let { identifier = "x" } = (Integer 5)
-       LET: let { identifier = "y" } = (Integer 10)
-       LET: let { identifier = "foobar" } = (Integer 838383)
-       LET: let { identifier = "foo" } = (Boolean true)
-       LET: let { identifier = "bar" } = (Boolean false)
-       LET: let { identifier = "name" } = (String "John")
-       EXPR: IfExpression {
-        condition =
-        Infix {left = (Identifier { identifier = "x" }); operator = Token.Equals;
-          right = (Identifier { identifier = "y" })};
-        consequence =
-        [Let {name = { identifier = "x" }; value = (Integer 3)};
-          Let {name = { identifier = "y" }; value = (Integer 4)}];
-        alternative =
-        (Some [Let {name = { identifier = "x" }; value = (Integer 0)};
-                Let {name = { identifier = "y" }; value = (Integer 0)}])}
-      ]
+      (Program
+         { statements =
+           [Let {name = { identifier = "x" }; value = (Integer 5)};
+             Let {name = { identifier = "y" }; value = (Integer 10)};
+             Let {name = { identifier = "foobar" }; value = (Integer 838383)};
+             Let {name = { identifier = "foo" }; value = (Boolean true)};
+             Let {name = { identifier = "bar" }; value = (Boolean false)};
+             Let {name = { identifier = "name" }; value = (String "John")};
+             (ExpressionStatement
+                IfExpression {
+                  condition =
+                  Infix {left = (Identifier { identifier = "x" });
+                    operator = Token.Equals;
+                    right = (Identifier { identifier = "y" })};
+                  consequence =
+                  { statements =
+                    [Let {name = { identifier = "x" }; value = (Integer 3)};
+                      Let {name = { identifier = "y" }; value = (Integer 4)}]
+                    };
+                  alternative =
+                  (Some { statements =
+                          [Let {name = { identifier = "x" }; value = (Integer 0)};
+                            Let {name = { identifier = "y" }; value = (Integer 0)}]
+                          })});
+             (ExpressionStatement
+                FunctionLiteral {params = [];
+                  body = { statements = [(Return (Boolean false))] }});
+             (ExpressionStatement
+                FunctionLiteral {params = [{ identifier = "x" }];
+                  body =
+                  { statements = [(Return (Identifier { identifier = "x" }))] }});
+             (ExpressionStatement
+                FunctionLiteral {
+                  params = [{ identifier = "x" }; { identifier = "y" }];
+                  body =
+                  { statements =
+                    [(ExpressionStatement
+                        Infix {left = (Identifier { identifier = "x" });
+                          operator = Token.Plus;
+                          right = (Identifier { identifier = "y" })})
+                      ]
+                    }})
+             ]
+           })
       |}]
   ;;
 
   let%expect_test "Test return statements" =
-    let input = {|
+    let input =
+      {|
     return 5;
     return true;
     return x;
     return "Test";
-  |} in
-    expect_program input Ast.show_expression;
+    if ("test" == "test") {
+      return true;
+    }
+  |}
+    in
+    expect_program input;
     [%expect
       {|
-      Program: [
-       RETURN: return (Integer 5)
-       RETURN: return (Boolean true)
-       RETURN: return (Identifier { identifier = "x" })
-       RETURN: return (String "Test")
-      ]
+      (Program
+         { statements =
+           [(Return (Integer 5)); (Return (Boolean true));
+             (Return (Identifier { identifier = "x" })); (Return (String "Test"));
+             (ExpressionStatement
+                IfExpression {
+                  condition =
+                  Infix {left = (String "test"); operator = Token.Equals;
+                    right = (String "test")};
+                  consequence = { statements = [(Return (Boolean true))] };
+                  alternative = None})
+             ]
+           })
       |}]
   ;;
 
@@ -340,12 +395,12 @@ module Tests = struct
     let input = {|
     foobar;
     |} in
-    expect_program input Ast.show_expression;
+    expect_program input;
     [%expect
       {|
-      Program: [
-       EXPR: (Identifier { identifier = "foobar" })
-      ]
+      (Program
+         { statements =
+           [(ExpressionStatement (Identifier { identifier = "foobar" }))] })
       |}]
   ;;
 
@@ -353,11 +408,30 @@ module Tests = struct
     let input = {|
     5;
     |} in
-    expect_program input Ast.show_expression;
-    [%expect {|
-      Program: [
-       EXPR: (Integer 5)
-      ]
+    expect_program input;
+    [%expect {| (Program { statements = [(ExpressionStatement (Integer 5))] }) |}]
+  ;;
+
+  let%expect_test "Test call expression parsing" =
+    let input = {|
+    add(1, 2 * 3, 4 + 5);
+    |} in
+    expect_program input;
+    [%expect
+      {|
+      (Program
+         { statements =
+           [(ExpressionStatement
+               CallExpression {fn = (Identifier { identifier = "add" });
+                 arguments =
+                 [(Integer 1);
+                   Infix {left = (Integer 2); operator = Token.Product;
+                     right = (Integer 3)};
+                   Infix {left = (Integer 4); operator = Token.Plus;
+                     right = (Integer 5)}
+                   ]})
+             ]
+           })
       |}]
   ;;
 
@@ -366,13 +440,14 @@ module Tests = struct
     true;
     false;
     |} in
-    expect_program input Ast.show_expression;
+    expect_program input;
     [%expect
       {|
-      Program: [
-       EXPR: (Boolean true)
-       EXPR: (Boolean false)
-      ]
+      (Program
+         { statements =
+           [(ExpressionStatement (Boolean true));
+             (ExpressionStatement (Boolean false))]
+           })
       |}]
   ;;
 
@@ -383,15 +458,20 @@ module Tests = struct
     !true;
     !false;
     |} in
-    expect_program input Ast.show_expression;
+    expect_program input;
     [%expect
       {|
-      Program: [
-       EXPR: Prefix {operator = Token.Not; right = (Integer 5)}
-       EXPR: Prefix {operator = Token.Minus; right = (Integer 15)}
-       EXPR: Prefix {operator = Token.Not; right = (Boolean true)}
-       EXPR: Prefix {operator = Token.Not; right = (Boolean false)}
-      ]
+      (Program
+         { statements =
+           [(ExpressionStatement Prefix {operator = Token.Not; right = (Integer 5)});
+             (ExpressionStatement
+                Prefix {operator = Token.Minus; right = (Integer 15)});
+             (ExpressionStatement
+                Prefix {operator = Token.Not; right = (Boolean true)});
+             (ExpressionStatement
+                Prefix {operator = Token.Not; right = (Boolean false)})
+             ]
+           })
       |}]
   ;;
 
@@ -409,21 +489,40 @@ module Tests = struct
     true == false;
     |}
     in
-    expect_program input Ast.show_expression;
+    expect_program input;
     [%expect
       {|
-      Program: [
-       EXPR: Infix {left = (Integer 5); operator = Token.Plus; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Minus; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Product; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Division; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Greater_than; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Less_than; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Equals; right = (Integer 5)}
-       EXPR: Infix {left = (Integer 5); operator = Token.Not_equals; right = (Integer 5)}
-       EXPR: Infix {left = (Boolean true); operator = Token.Equals;
-        right = (Boolean false)}
-      ]
+      (Program
+         { statements =
+           [(ExpressionStatement
+               Infix {left = (Integer 5); operator = Token.Plus;
+                 right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Minus;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Product;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Division;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Greater_than;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Less_than;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Equals;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Integer 5); operator = Token.Not_equals;
+                  right = (Integer 5)});
+             (ExpressionStatement
+                Infix {left = (Boolean true); operator = Token.Equals;
+                  right = (Boolean false)})
+             ]
+           })
       |}]
   ;;
 
@@ -448,32 +547,39 @@ module Tests = struct
     1 + (2 + 3) + 4;
     2 / (5 + 5);
     -(5 + 5);
+    a + add(b * c) + d;
+    add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))
+    add(a + b + c * d / f + g)
     |}
     in
-    expect_program input Ast.expression_to_string;
-    [%expect
-      {|
-      Program: [
-       EXPR: ((-a)*5)
-       EXPR: (!(-a))
-       EXPR: ((a+b)+c)
-       EXPR: ((a+b)-c)
-       EXPR: ((a*b)*c)
-       EXPR: ((a*b)/c)
-       EXPR: (a+(b/c))
-       EXPR: (((a+(b*c))+(d/e))-f)
-       EXPR: (3+4)
-       EXPR: ((-5)*5)
-       EXPR: ((5>4)==(3<4))
-       EXPR: ((5<4)!=(3>4))
-       EXPR: ((5>4)==false)
-       EXPR: ((5<4)==true)
-       EXPR: ((3+(4*5))==((3*1)+(4*5)))
-       EXPR: ((a+b)*c)
-       EXPR: ((1+(2+3))+4)
-       EXPR: (2/(5+5))
-       EXPR: (-(5+5))
-      ]
-      |}]
+    match input |> Lexer.init |> init |> parse with
+    | Error error -> Stdio.print_endline error
+    | Ok node ->
+      Stdio.print_endline (Ast.show_node node);
+      [%expect
+        {|
+        ((-a) * 5);
+        (!(-a));
+        ((a + b) + c);
+        ((a + b) - c);
+        ((a * b) * c);
+        ((a * b) / c);
+        (a + (b / c));
+        (((a + (b * c)) + (d / e)) - f);
+        (3 + 4);
+        ((-5) * 5);
+        ((5 > 4) == (3 < 4));
+        ((5 < 4) != (3 > 4));
+        ((5 > 4) == false);
+        ((5 < 4) == true);
+        ((3 + (4 * 5)) == ((3 * 1) + (4 * 5)));
+        ((a + b) * c);
+        ((1 + (2 + 3)) + 4);
+        (2 / (5 + 5));
+        (-(5 + 5));
+        ((a + add((b * c))) + d);
+        add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)));
+        add((((a + b) + ((c * d) / f)) + g));
+        |}]
   ;;
 end

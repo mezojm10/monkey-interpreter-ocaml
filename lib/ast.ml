@@ -1,5 +1,7 @@
+open! Base
+
 type node =
-  | Program of stmt_list
+  | Program of block_stmt
   | Expression of expression
   | Statement of statement
 
@@ -20,8 +22,16 @@ and expression =
   | GroupedExpression of expression
   | IfExpression of
       { condition : expression
-      ; consequence : statement list
-      ; alternative : statement list option
+      ; consequence : block_stmt
+      ; alternative : block_stmt option
+      }
+  | FunctionLiteral of
+      { params : identifier list
+      ; body : block_stmt
+      }
+  | CallExpression of
+      { fn : expression
+      ; arguments : expression list
       }
 
 and statement =
@@ -31,24 +41,65 @@ and statement =
       }
   | Return of expression
   | ExpressionStatement of expression
-  | BlockStatement of stmt_list
+  | BlockStatement of block_stmt
 
-and stmt_list = { statements : statement list }
+and block_stmt = { statements : statement list }
 and identifier = { identifier : string } [@@deriving show { with_path = false }]
 
-let rec expression_to_string = function
-  | Prefix { operator; right } ->
-    "(" ^ Token.show operator ^ expression_to_string right ^ ")"
+let list_to_string list =
+  let rec loop list acc =
+    match list with
+    | [] -> acc
+    | [ x ] -> acc ^ x
+    | x :: t -> acc ^ x ^ ", " |> loop t
+  in
+  loop list ""
+;;
+
+let show_identifier ident = ident.identifier
+
+let rec show_expression = function
+  | Prefix { operator; right } -> "(" ^ Token.show operator ^ show_expression right ^ ")"
   | Infix { left; operator; right } ->
     "("
-    ^ expression_to_string left
+    ^ show_expression left
+    ^ " "
     ^ Token.show operator
-    ^ expression_to_string right
+    ^ " "
+    ^ show_expression right
     ^ ")"
   | Integer integer -> Int.to_string integer
   | Identifier { identifier } -> identifier
   | String string -> "\"" ^ string ^ "\""
-  | Boolean bool -> string_of_bool bool
-  | GroupedExpression expr -> expression_to_string expr
+  | Boolean bool -> Bool.to_string bool
+  | GroupedExpression expr -> show_expression expr
   | IfExpression _ as expr -> show_expression expr
+  | FunctionLiteral { params; body } ->
+    "fn("
+    ^ list_to_string (List.map ~f:show_identifier params)
+    ^ ")"
+    ^ show_block_stmt body
+  | CallExpression { fn; arguments } ->
+    show_expression fn
+    ^ "("
+    ^ list_to_string (List.map ~f:show_expression arguments)
+    ^ ")"
+;;
+
+let rec show_statement = function
+  | Let { name; value } ->
+    "let " ^ show_identifier name ^ " = " ^ show_expression value ^ ";"
+  | Return expr -> "return " ^ show_expression expr ^ ";"
+  | ExpressionStatement expr -> show_expression expr ^ ";"
+  | BlockStatement { statements } ->
+    List.fold statements ~init:"{\n" ~f:(fun acc statement ->
+      acc ^ show_statement statement ^ "\n")
+    ^ "\n}"
+;;
+
+let show_node = function
+  | Program { statements } ->
+    List.fold statements ~init:"" ~f:(fun acc stmt -> acc ^ show_statement stmt ^ "\n")
+  | Expression expr -> show_expression expr
+  | Statement stmt -> show_statement stmt
 ;;
