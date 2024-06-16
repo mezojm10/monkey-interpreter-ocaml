@@ -176,7 +176,7 @@ and expr_parse_prefix parser op =
 and expr_parse_grouped parser =
   let* parser, expr = parse_expr parser `LOWEST in
   let* parser = expect parser Token.Right_paren in
-  Ok (parser, Ast.GroupedExpression expr)
+  Ok (parser, expr)
 
 and expr_parse_infix parser ~op ~left =
   (* Fmt.pr "parsing infix operator: %s\n" (Token.show (Option.value_exn parser.curToken)); *)

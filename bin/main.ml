@@ -13,7 +13,7 @@ let () =
          printf "%s\n" error;
          loop ()
        | Ok node ->
-         print_endline (Ast.show_node node);
+         print_endline (Eval.Object.show_obj (Eval.eval_node node));
          print_endline "";
          loop ())
   in

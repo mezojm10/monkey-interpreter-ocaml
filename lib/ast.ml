@@ -19,7 +19,6 @@ and expression =
       ; operator : Token.t
       ; right : expression
       }
-  | GroupedExpression of expression
   | IfExpression of
       { condition : expression
       ; consequence : block_stmt
@@ -72,7 +71,6 @@ let rec show_expression = function
   | Identifier { identifier } -> identifier
   | String string -> "\"" ^ string ^ "\""
   | Boolean bool -> Bool.to_string bool
-  | GroupedExpression expr -> show_expression expr
   | IfExpression _ as expr -> show_expression expr
   | FunctionLiteral { params; body } ->
     "fn("
