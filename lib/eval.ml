@@ -13,12 +13,15 @@ module Object = struct
         ; env : env
         }
     | Null
+    | Builtin of builtin
     | Error of string
 
   and env =
     { store : (string, t) Hashtbl.t
     ; outer : env option
     }
+
+  and builtin = Len
 
   let rec show = function
     | Integer int -> Int.to_string int
@@ -29,6 +32,7 @@ module Object = struct
     | Null -> "null"
     | Function { params; body; _ } ->
       Ast.show_expression (FunctionLiteral { params; body })
+    | Builtin _ -> "builtin function"
     | Error string -> string
   ;;
 
@@ -39,6 +43,7 @@ module Object = struct
     | Null -> "NULL"
     | ReturnValue _ -> "RETURN_VALUE"
     | Function _ -> "FUNCTION"
+    | Builtin _ -> "BUILTIN"
     | Error _ -> "ERROR"
   ;;
 end
@@ -100,10 +105,7 @@ and eval_expr expr env : Object.t =
     (match eval_expr condition env with
      | Error _ as obj -> obj
      | condition -> eval_if_expr env ~consequence ~alternative ~condition)
-  | Identifier { identifier } ->
-    Environment.get env identifier
-    |> Option.value
-         ~default:(Object.Error (Fmt.str "identifier not found: %s" identifier))
+  | Identifier { identifier } -> eval_ident identifier env
   | FunctionLiteral { params; body } -> Function { params; body; env }
   | CallExpression { fn; arguments } ->
     (match eval_expr fn env with
@@ -113,13 +115,34 @@ and eval_expr expr env : Object.t =
         | [ (Error _ as value) ] -> value
         | arguments -> apply_function fn arguments))
 
+and eval_ident ident env =
+  match Environment.get env ident with
+  | Some obj -> obj
+  | None ->
+    (match ident with
+     | "len" -> Builtin Len
+     | _ -> Object.Error (Fmt.str "identifier not found: %s" ident))
+
 and apply_function fn args =
   match fn with
   | Function { params; body; env } ->
     (match Environment.extend env ~args ~params with
      | Error err -> Error err
      | Ok env -> eval_function_block body env)
+  | Builtin fn -> eval_builtin fn args
   | obj -> Object.Error (Fmt.str "Not a function: %s" @@ Object.obj_type obj)
+
+and eval_builtin fn args =
+  match fn with
+  | Len -> eval_builtin_len args
+
+and eval_builtin_len = function
+  | [ String string ] -> Integer (String.length string)
+  | [ ((Builtin _ | Error _ | Function _ | ReturnValue _ | Integer _ | True | False | Null)
+       as obj)
+    ] -> Error (Fmt.str "unsupported argument for len: %s" (Object.obj_type obj))
+  | ([] | _ :: _) as args ->
+    Error (Fmt.str "len requires 1 argument, got: %d" (List.length args))
 
 and eval_stmt stmt env : Object.t =
   match stmt with
@@ -236,6 +259,7 @@ and eval_infix_expr left op right =
   | True, Token.Not_equals, False -> True
   | False, Token.Not_equals, True -> True
   | False, Token.Not_equals, False -> False
+  | String s1, Token.Plus, String s2 -> String (s1 ^ s2)
   | ( Integer _
     , ( Token.Plus
       | Token.Minus
@@ -342,11 +366,12 @@ module Tests = struct
   ;;
 
   let%expect_test "test eval string expression" =
-    let input = {|
-      "this is a string";
-    |} in
-    test_eval input;
-    [%expect {| "this is a string" |}]
+    let input = [ {|"this is a string";|}; {|"Hello " + "World!"|} ] in
+    List.iter ~f:test_eval input;
+    [%expect {|
+      "this is a string"
+      "Hello World!"
+      |}]
   ;;
 
   let%expect_test "test not operator" =
@@ -474,6 +499,7 @@ module Tests = struct
       ; "5; true + false; 5;"
       ; "if (10 > 1) { true + false; }"
       ; "if (10 > 1) { if (10 > 1) { return true + false; } return 1; }"
+      ; {| "Hello" + 15 |}
       ; "foobar"
       ]
     in
@@ -488,6 +514,7 @@ module Tests = struct
       unknown operator: BOOL + BOOL
       unknown operator: BOOL + BOOL
       unknown operator: BOOL + BOOL
+      type mismatch: STRING + INT
       identifier not found: foobar
       |}]
   ;;
@@ -569,6 +596,28 @@ module Tests = struct
     List.iter input ~f:test_eval;
     [%expect {|
       4
+      |}]
+  ;;
+
+  let%expect_test "test builtin functions" =
+    let input = [ {| len("") |}; {| len("four") |}; {| len("Mazin"); |} ] in
+    List.iter input ~f:test_eval;
+    [%expect {|
+      0
+      4
+      5
+      |}]
+  ;;
+
+  let%expect_test "test builtin function errors" =
+    let input = [ "len();"; "len(5);"; "len(true);"; {| len(5 + 5, "mazin"); |} ] in
+    List.iter input ~f:test_eval;
+    [%expect
+      {|
+      len requires 1 argument, got: 0
+      unsupported argument for len: INT
+      unsupported argument for len: BOOL
+      len requires 1 argument, got: 2
       |}]
   ;;
 end
