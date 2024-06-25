@@ -16,7 +16,7 @@ module Object = struct
     | Error of string
 
   and env =
-    { store : (string, t, String.comparator_witness) Map.t
+    { store : (string, t) Hashtbl.t
     ; outer : env option
     }
 
@@ -46,28 +46,30 @@ end
 module Environment = struct
   open Object
 
-  let empty = Map.empty (module String)
+  let empty = Hashtbl.create (module String)
   let init = { outer = None; store = empty }
-  let init_inner outer = { outer = Some outer; store = empty }
+  let init_enclosed outer = { outer = Some outer; store = empty }
 
   let rec get env key =
-    match Map.find env.store key, env.outer with
+    match Hashtbl.find env.store key, env.outer with
     | (Some _ as value), _ -> value
     | None, Some outer -> get outer key
     | None, None -> None
   ;;
 
-  let set env ~key ~data = { env with store = Map.set env.store ~key ~data }
+  let set env ~key ~data = Hashtbl.set env.store ~key ~data
 
   let extend env ~params ~args =
-    let rec loop params args env =
+    let env = init_enclosed env in
+    let rec loop params args =
       match params, args with
       | [], [] -> Ok env
       | Ast.{ identifier = param } :: params, arg :: args ->
-        set env ~key:param ~data:arg |> loop params args
+        set env ~key:param ~data:arg;
+        loop params args
       | _, _ -> Error "Extend failed"
     in
-    loop params args @@ init_inner env
+    loop params args
   ;;
 end
 
@@ -77,40 +79,39 @@ let rec eval_node node env =
   | Expression expr -> eval_expr expr env
   | Statement stmt -> eval_stmt stmt env
 
-and eval_expr expr env : Object.t * Object.env =
+and eval_expr expr env : Object.t =
   match expr with
-  | Integer int -> Object.Integer int, env
-  | Boolean true -> True, env
-  | Boolean false -> False, env
-  | String string -> String string, env
+  | Integer int -> Object.Integer int
+  | Boolean true -> True
+  | Boolean false -> False
+  | String string -> String string
   | Prefix { operator; right } ->
     (match eval_expr right env with
-     | (Error _ as right), env -> right, env
-     | right, env -> eval_prefix_expr operator right, env)
+     | Error _ as right -> right
+     | right -> eval_prefix_expr operator right)
   | Infix { left; operator; right } ->
     (match eval_expr left env with
-     | (Error _ as left), env -> left, env
-     | left, env ->
+     | Error _ as left -> left
+     | left ->
        (match eval_expr right env with
-        | (Error _ as right), env -> right, env
-        | right, env -> eval_infix_expr left operator right, env))
+        | Error _ as right -> right
+        | right -> eval_infix_expr left operator right))
   | IfExpression { condition; consequence; alternative } ->
     (match eval_expr condition env with
-     | (Error _ as obj), env -> obj, env
+     | Error _ as obj -> obj
      | condition -> eval_if_expr env ~consequence ~alternative ~condition)
   | Identifier { identifier } ->
-    ( Environment.get env identifier
-      |> Option.value
-           ~default:(Object.Error (Fmt.str "identifier not found: %s" identifier))
-    , env )
-  | FunctionLiteral { params; body } -> Function { params; body; env }, env
+    Environment.get env identifier
+    |> Option.value
+         ~default:(Object.Error (Fmt.str "identifier not found: %s" identifier))
+  | FunctionLiteral { params; body } -> Function { params; body; env }
   | CallExpression { fn; arguments } ->
     (match eval_expr fn env with
-     | (Error _ as value), env -> value, env
-     | fn, env ->
+     | Error _ as value -> value
+     | fn ->
        (match eval_expressions arguments env with
-        | [ (Error _ as value) ], env -> value, env
-        | arguments, env -> apply_function fn arguments, env))
+        | [ (Error _ as value) ] -> value
+        | arguments -> apply_function fn arguments))
 
 and apply_function fn args =
   match fn with
@@ -120,84 +121,83 @@ and apply_function fn args =
      | Ok env -> eval_function_block body env)
   | obj -> Object.Error (Fmt.str "Not a function: %s" @@ Object.obj_type obj)
 
-and eval_stmt stmt env =
+and eval_stmt stmt env : Object.t =
   match stmt with
   | ExpressionStatement expr -> eval_expr expr env
   | Return expr ->
     (match eval_expr expr env with
-     | (Error _ as obj), env -> obj, env
-     | obj, env -> ReturnValue obj, env)
+     | Error _ as obj -> obj
+     | obj -> ReturnValue obj)
   | Let { name; value } ->
     (match eval_expr value env with
-     | (Error _ as obj), env -> obj, env
-     | (ReturnValue obj | obj), env ->
-       Null, Environment.set env ~key:name.identifier ~data:obj)
+     | Error _ as obj -> obj
+     | ReturnValue obj | obj ->
+       Environment.set env ~key:name.identifier ~data:obj;
+       Null)
   | BlockStatement { statements } -> eval_block statements env
 
-and eval_if_expr env ~condition ~consequence ~alternative : Object.t * Object.env =
+and eval_if_expr env ~condition ~consequence ~alternative : Object.t =
   if is_truthy condition
   then eval_block consequence.statements env
   else (
     match alternative with
     | Some alternative -> eval_block alternative.statements env
-    | None -> Object.Null, env)
+    | None -> Null)
 
 and is_truthy = function
-  | (False | Null), _ -> false
-  | True, _ -> true
+  | False | Null -> false
+  | True -> true
   | _ -> true
 
 and eval_function_block ({ statements } : Ast.block_stmt) env =
-  let rec loop stmts env =
+  let rec loop stmts =
     match stmts with
     | [] -> failwith "Empty function"
-    | [ stmt ] ->
-      let obj, _ = eval_stmt stmt env in
-      obj
-    | stmt :: t ->
+    | [ stmt ] -> eval_stmt stmt env
+    | stmt :: stmts ->
       (match eval_stmt stmt env with
-       | ReturnValue value, _ -> value
-       | (Error _ as value), _ -> value
-       | _, env -> loop t env)
+       | ReturnValue value -> value
+       | Error _ as value -> value
+       | _ -> loop stmts)
   in
-  loop statements env
+  loop statements
 
-and eval_block stmts env : Object.t * Object.env =
-  let rec loop stmts env =
+and eval_block stmts env : Object.t =
+  let rec loop stmts =
     match stmts with
     | [] -> failwith "Empty Program"
     | [ stmt ] -> eval_stmt stmt env
     | stmt :: t ->
       (match eval_stmt stmt env with
-       | ((ReturnValue _ | Error _) as value), env -> value, env
-       | _, env -> loop t env)
+       | (ReturnValue _ | Error _) as value -> value
+       | _ -> loop t)
   in
-  loop stmts env
+  loop stmts
 
-and eval_program stmts env : Object.t * Object.env =
-  let rec loop stmts env =
+and eval_program stmts env : Object.t =
+  let rec loop stmts =
     match stmts with
     | [] -> failwith "Empty Program"
     | [ stmt ] ->
       (match eval_stmt stmt env with
-       | ReturnValue value, env -> value, env
-       | obj, env -> obj, env)
+       | ReturnValue value -> value
+       | obj -> obj)
     | stmt :: t ->
       (match eval_stmt stmt env with
-       | ReturnValue value, env -> value, env
-       | (Error _ as value), env -> value, env
-       | _, env -> loop t env)
+       | ReturnValue value -> value
+       | Error _ as value -> value
+       | _ -> loop t)
   in
-  loop stmts env
+  loop stmts
 
-and eval_expressions exps env : Object.t list * Object.env =
+and eval_expressions exps env : Object.t list =
   let rec loop exps acc env =
     match exps with
-    | [] -> List.rev acc, env
+    | [] -> List.rev acc
     | exp :: t ->
       (match eval_expr exp env with
-       | (Error _ as obj), env -> [ obj ], env
-       | obj, env -> loop t (obj :: acc) env)
+       | Error _ as obj -> [ obj ]
+       | obj -> loop t (obj :: acc) env)
   in
   loop exps [] env
 
@@ -288,7 +288,7 @@ module Tests = struct
     match Parser.parse parser with
     | Error error -> Stdio.print_endline error
     | Ok node ->
-      let obj, _env = eval_node node Environment.init in
+      let obj = eval_node node Environment.init in
       Stdio.print_endline (Object.show obj)
   ;;
 
@@ -530,6 +530,17 @@ module Tests = struct
       ; "let add = fn(x, y) { x + y }; add(1, 2);"
       ; "let add = fn(x, y) { x + y }; add(5, add(5, 5))"
       ; "fn(x) { x; }(5)"
+      ; {|
+        let counter = fn(x) {
+          if (x > 100) {
+            return true;
+          } else {
+            let foobar = 9999;
+            counter(x + 1);
+          }
+        };
+        counter(0);
+      |}
       ]
     in
     List.iter input ~f:test_eval;
@@ -539,6 +550,7 @@ module Tests = struct
       3
       15
       5
+      true
       |}]
   ;;
 

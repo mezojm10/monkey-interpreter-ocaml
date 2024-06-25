@@ -2,7 +2,8 @@ open! Core
 open Monkey_interpreter
 
 let () =
-  let rec loop env =
+  let env = Eval.Environment.init in
+  let rec loop () =
     printf "> ";
     Out_channel.flush Out_channel.stdout;
     match In_channel.input_line In_channel.stdin with
@@ -11,12 +12,12 @@ let () =
       (match line |> Lexer.init |> Parser.init |> Parser.parse with
        | Error error ->
          printf "%s\n" error;
-         loop env
+         loop ()
        | Ok node ->
-         let obj, env = Eval.eval_node node env in
+         let obj = Eval.eval_node node env in
          print_endline (Eval.Object.show obj);
          print_endline "";
-         loop env)
+         loop ())
   in
-  loop Eval.Environment.init
+  loop ()
 ;;
