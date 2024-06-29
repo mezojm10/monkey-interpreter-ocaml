@@ -8,6 +8,11 @@ type node =
 and expression =
   | Integer of int
   | String of string
+  | List of expression list
+  | IndexExpression of
+      { list : expression
+      ; index : expression
+      }
   | Boolean of bool
   | Identifier of identifier
   | Prefix of
@@ -82,6 +87,9 @@ let rec show_expression = function
     ^ "("
     ^ list_to_string (List.map ~f:show_expression arguments)
     ^ ")"
+  | List exps -> "[" ^ list_to_string (List.map ~f:show_expression exps) ^ "]"
+  | IndexExpression { list; index } ->
+    "(" ^ show_expression list ^ "[" ^ show_expression index ^ "])"
 ;;
 
 let rec show_statement = function

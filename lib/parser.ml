@@ -10,6 +10,7 @@ type precedence =
   | `PRODUCT
   | `PREFIX
   | `CALL
+  | `INDEX
   ]
 [@@deriving ord]
 
@@ -19,6 +20,7 @@ let get_precedence = function
   | Token.Plus | Token.Minus -> `SUM
   | Token.Product | Token.Division -> `PRODUCT
   | Token.Left_paren -> `CALL
+  | Token.Left_bracket -> `INDEX
   | _ -> `LOWEST
 ;;
 
@@ -145,6 +147,7 @@ and prefix_parse parser =
     | Some Token.Left_paren -> expr_parse_grouped (next_token parser)
     | Some Token.If -> expr_parse_if parser
     | Some Token.Function -> expr_parse_function parser
+    | Some Token.Left_bracket -> expr_parse_list_literal parser
     | Some tok ->
       Error (Fmt.str "Invalid expression, expected prefix, got %s" (Token.show tok))
     | _ -> Error "Invalid expression"
@@ -167,6 +170,7 @@ and infix_parse parser =
        | Token.Equals
        | Token.Not_equals ) as op) -> Some (expr_parse_infix, op)
   | Some (Token.Left_paren as op) -> Some (expr_parse_call, op)
+  | Some (Token.Left_bracket as op) -> Some (expr_parse_index, op)
   | _ -> None
 
 and expr_parse_prefix parser op =
@@ -177,6 +181,13 @@ and expr_parse_grouped parser =
   let* parser, expr = parse_expr parser `LOWEST in
   let* parser = expect parser Token.Right_paren in
   Ok (parser, expr)
+
+and expr_parse_list_literal parser =
+  match parse_expression_list parser Token.Right_bracket with
+  | Error "EOF" -> Error "Reached EOF when parsing list"
+  | Error "consecutive-commas" -> Error "2 consecutive commas when parsing list"
+  | Error _ as err -> err
+  | Ok (parser, elements) -> Ok (parser, Ast.List elements)
 
 and expr_parse_infix parser ~op ~left =
   (* Fmt.pr "parsing infix operator: %s\n" (Token.show (Option.value_exn parser.curToken)); *)
@@ -204,21 +215,32 @@ and expr_parse_function parser =
   let* parser, body = parse_block (next_token parser) in
   Ok (parser, Ast.FunctionLiteral { params; body })
 
-and parse_arguments parser =
+and parse_expression_list parser end_token =
   let rec loop parser args =
     match parser.nextToken with
-    | Some Token.Right_paren -> Ok (next_token parser, List.rev args)
+    | Some Token.Comma when cur_token_is parser Token.Comma -> Error "consecutive-commas"
     | Some Token.Comma -> loop (next_token parser) args
+    | Some token when Token.(equal token end_token) ->
+      Ok (next_token parser, List.rev args)
     | Some _ ->
       let* parser, expr = parse_expr (next_token parser) `LOWEST in
       expr :: args |> loop parser
-    | None -> Error "Reached EOF when parsing call expression"
+    | None -> Error "EOF"
   in
   loop parser []
 
 and expr_parse_call parser ~op:_op ~left =
-  let* parser, arguments = parse_arguments parser in
-  Ok (parser, Ast.CallExpression { fn = left; arguments })
+  match parse_expression_list parser Token.Right_paren with
+  | Error "EOF" -> Error "Reached EOF when parsing call expression"
+  | Error "consecutive-commas" ->
+    Error "2 consecutive commas when parsing call expression"
+  | Error _ as err -> err
+  | Ok (parser, arguments) -> Ok (parser, Ast.CallExpression { fn = left; arguments })
+
+and expr_parse_index parser ~op:_op ~left =
+  let* parser, index = parse_expr (next_token parser) `LOWEST in
+  let* parser = expect parser Token.Right_bracket in
+  Ok (parser, Ast.IndexExpression { list = left; index })
 
 and expr_parse_if parser =
   let* parser = expect parser Token.Left_paren in
@@ -273,6 +295,11 @@ and peek_precedence parser =
   | Some tok -> get_precedence tok
   | None -> `LOWEST
 
+and cur_token_is parser token =
+  match parser.curToken with
+  | Some tok -> Token.equal token tok
+  | None -> false
+
 and peek_token_is parser token =
   match parser.nextToken with
   | Some tok -> Token.equal token tok
@@ -298,7 +325,9 @@ module Tests = struct
     let foo = true;
     let bar = false;
     let name = "John";
-    if (x == y){
+    let names = ["Mazin", "Khalid"];
+    [1 * 1, 2 + 2][0]
+    if (x == y) {
       let x = 3;
       let y = 4;
     } else {
@@ -321,6 +350,18 @@ module Tests = struct
              Let {name = { identifier = "foo" }; value = (Boolean true)};
              Let {name = { identifier = "bar" }; value = (Boolean false)};
              Let {name = { identifier = "name" }; value = (String "John")};
+             Let {name = { identifier = "names" };
+               value = (List [(String "Mazin"); (String "Khalid")])};
+             (ExpressionStatement
+                IndexExpression {
+                  list =
+                  (List
+                     [Infix {left = (Integer 1); operator = Token.Product;
+                        right = (Integer 1)};
+                       Infix {left = (Integer 2); operator = Token.Plus;
+                         right = (Integer 2)}
+                       ]);
+                  index = (Integer 0)});
              (ExpressionStatement
                 IfExpression {
                   condition =
@@ -548,8 +589,10 @@ module Tests = struct
     2 / (5 + 5);
     -(5 + 5);
     a + add(b * c) + d;
-    add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8))
-    add(a + b + c * d / f + g)
+    add(a, b, 1, 2 * 3, 4 + 5, add(6, 7 * 8));
+    add(a + b + c * d / f + g);
+    add(a * b[2], b[1], 2 * [1, 2][1])
+    a * [1, 2, 3, 4][b * c] * d
     |}
     in
     match input |> Lexer.init |> init |> parse with
@@ -580,6 +623,8 @@ module Tests = struct
         ((a + add((b * c))) + d);
         add(a, b, 1, (2 * 3), (4 + 5), add(6, (7 * 8)));
         add((((a + b) + ((c * d) / f)) + g));
+        add((a * (b[2])), (b[1]), (2 * ([1, 2][1])));
+        ((a * ([1, 2, 3, 4][(b * c)])) * d);
         |}]
   ;;
 end

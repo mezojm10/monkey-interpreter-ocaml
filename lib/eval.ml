@@ -6,6 +6,7 @@ module Object = struct
     | True
     | False
     | String of string
+    | List of t list
     | ReturnValue of t
     | Function of
         { params : Ast.identifier list
@@ -21,7 +22,12 @@ module Object = struct
     ; outer : env option
     }
 
-  and builtin = Len
+  and builtin =
+    | Len
+    | First
+    | Last
+    | Rest
+    | Push
 
   let rec show = function
     | Integer int -> Int.to_string int
@@ -32,6 +38,7 @@ module Object = struct
     | Null -> "null"
     | Function { params; body; _ } ->
       Ast.show_expression (FunctionLiteral { params; body })
+    | List objs -> "[" ^ Ast.list_to_string (List.map ~f:show objs) ^ "]"
     | Builtin _ -> "builtin function"
     | Error string -> string
   ;;
@@ -43,6 +50,7 @@ module Object = struct
     | Null -> "NULL"
     | ReturnValue _ -> "RETURN_VALUE"
     | Function _ -> "FUNCTION"
+    | List _ -> "LIST"
     | Builtin _ -> "BUILTIN"
     | Error _ -> "ERROR"
   ;;
@@ -78,6 +86,12 @@ module Environment = struct
   ;;
 end
 
+let ( let* ) obj f =
+  match obj with
+  | Object.Error _ as error -> error
+  | obj -> f obj
+;;
+
 let rec eval_node node env =
   match node with
   | Ast.Program { statements } -> eval_program statements env
@@ -90,30 +104,31 @@ and eval_expr expr env : Object.t =
   | Boolean true -> True
   | Boolean false -> False
   | String string -> String string
+  | List exps ->
+    (match eval_expressions exps env with
+     | [ (Error _ as value) ] -> value
+     | elements -> List elements)
+  | IndexExpression { list; index } ->
+    let* list = eval_expr list env in
+    let* index = eval_expr index env in
+    eval_index_expr list index
   | Prefix { operator; right } ->
-    (match eval_expr right env with
-     | Error _ as right -> right
-     | right -> eval_prefix_expr operator right)
+    let* right = eval_expr right env in
+    eval_prefix_expr operator right
   | Infix { left; operator; right } ->
-    (match eval_expr left env with
-     | Error _ as left -> left
-     | left ->
-       (match eval_expr right env with
-        | Error _ as right -> right
-        | right -> eval_infix_expr left operator right))
+    let* left = eval_expr left env in
+    let* right = eval_expr right env in
+    eval_infix_expr left operator right
   | IfExpression { condition; consequence; alternative } ->
-    (match eval_expr condition env with
-     | Error _ as obj -> obj
-     | condition -> eval_if_expr env ~consequence ~alternative ~condition)
+    let* condition = eval_expr condition env in
+    eval_if_expr env ~consequence ~alternative ~condition
   | Identifier { identifier } -> eval_ident identifier env
   | FunctionLiteral { params; body } -> Function { params; body; env }
   | CallExpression { fn; arguments } ->
-    (match eval_expr fn env with
-     | Error _ as value -> value
-     | fn ->
-       (match eval_expressions arguments env with
-        | [ (Error _ as value) ] -> value
-        | arguments -> apply_function fn arguments))
+    let* fn = eval_expr fn env in
+    (match eval_expressions arguments env with
+     | [ (Error _ as value) ] -> value
+     | arguments -> apply_function fn arguments)
 
 and eval_ident ident env =
   match Environment.get env ident with
@@ -121,6 +136,10 @@ and eval_ident ident env =
   | None ->
     (match ident with
      | "len" -> Builtin Len
+     | "first" -> Builtin First
+     | "last" -> Builtin Last
+     | "rest" -> Builtin Rest
+     | "push" -> Builtin Push
      | _ -> Object.Error (Fmt.str "identifier not found: %s" ident))
 
 and apply_function fn args =
@@ -132,31 +151,17 @@ and apply_function fn args =
   | Builtin fn -> eval_builtin fn args
   | obj -> Object.Error (Fmt.str "Not a function: %s" @@ Object.obj_type obj)
 
-and eval_builtin fn args =
-  match fn with
-  | Len -> eval_builtin_len args
-
-and eval_builtin_len = function
-  | [ String string ] -> Integer (String.length string)
-  | [ ((Builtin _ | Error _ | Function _ | ReturnValue _ | Integer _ | True | False | Null)
-       as obj)
-    ] -> Error (Fmt.str "unsupported argument for len: %s" (Object.obj_type obj))
-  | ([] | _ :: _) as args ->
-    Error (Fmt.str "len requires 1 argument, got: %d" (List.length args))
-
 and eval_stmt stmt env : Object.t =
   match stmt with
   | ExpressionStatement expr -> eval_expr expr env
   | Return expr ->
-    (match eval_expr expr env with
-     | Error _ as obj -> obj
-     | obj -> ReturnValue obj)
+    let* obj = eval_expr expr env in
+    ReturnValue obj
   | Let { name; value } ->
-    (match eval_expr value env with
-     | Error _ as obj -> obj
-     | ReturnValue obj | obj ->
-       Environment.set env ~key:name.identifier ~data:obj;
-       Null)
+    let* obj = eval_expr value env in
+    let obj = unwrap_return obj in
+    Environment.set env ~key:name.identifier ~data:obj;
+    Null
   | BlockStatement { statements } -> eval_block statements env
 
 and eval_if_expr env ~condition ~consequence ~alternative : Object.t =
@@ -201,10 +206,7 @@ and eval_program stmts env : Object.t =
   let rec loop stmts =
     match stmts with
     | [] -> failwith "Empty Program"
-    | [ stmt ] ->
-      (match eval_stmt stmt env with
-       | ReturnValue value -> value
-       | obj -> obj)
+    | [ stmt ] -> eval_stmt stmt env |> unwrap_return
     | stmt :: t ->
       (match eval_stmt stmt env with
        | ReturnValue value -> value
@@ -229,6 +231,17 @@ and eval_prefix_expr op right =
   | Token.Not -> eval_not_operator_expression right
   | Token.Minus -> eval_negation right
   | _ -> Error (Fmt.str "Unknown operator: %s%s" (Token.show op) (Object.show right))
+
+and eval_index_expr list index =
+  match list, index with
+  | List list, Integer int -> List.nth list int |> Option.value ~default:Object.Null
+  | String string, Integer int when int < String.length string ->
+    String (Char.to_string @@ String.get string int)
+  | String _, Integer _ -> Null
+  | (List _ | String _), obj ->
+    Error (Fmt.str "Unsupported use of %s as index" @@ Object.obj_type obj)
+  | obj, _ ->
+    Error (Fmt.str "Unsupported index operation on type: %s" @@ Object.obj_type obj)
 
 and eval_not_operator_expression = function
   | True -> False
@@ -303,6 +316,91 @@ and eval_infix_expr left op right =
 and eval_native_bool_to_obj = function
   | true -> True
   | false -> False
+
+and unwrap_return = function
+  | ReturnValue obj | obj -> obj
+
+and eval_builtin fn args =
+  match fn with
+  | Len -> eval_builtin_len args
+  | First -> eval_builtin_first args
+  | Last -> eval_builtin_last args
+  | Rest -> eval_builtin_rest args
+  | Push -> eval_builtin_push args
+
+and eval_builtin_len = function
+  | [ String string ] -> Integer (String.length string)
+  | [ List list ] -> Integer (List.length list)
+  | [ ((Builtin _ | Error _ | Function _ | ReturnValue _ | Integer _ | True | False | Null)
+       as obj)
+    ] -> Error (Fmt.str "unsupported argument for len: %s" (Object.obj_type obj))
+  | ([] | _ :: _ :: _) as args ->
+    Error (Fmt.str "len requires 1 argument, got: %d" (List.length args))
+
+and eval_builtin_first = function
+  | [ List [] ] -> Null
+  | [ List (h :: _) ] -> h
+  | [ (( Builtin _
+       | Error _
+       | Function _
+       | ReturnValue _
+       | Integer _
+       | String _
+       | True
+       | False
+       | Null ) as obj)
+    ] -> Error (Fmt.str "unsupported argument for first: %s" (Object.obj_type obj))
+  | ([] | _ :: _ :: _) as args ->
+    Error (Fmt.str "first requires 1 argument, got: %d" (List.length args))
+
+and eval_builtin_last = function
+  | [ List [] ] -> Null
+  | [ List list ] -> List.last_exn list
+  | [ (( Builtin _
+       | Error _
+       | Function _
+       | ReturnValue _
+       | Integer _
+       | String _
+       | True
+       | False
+       | Null ) as obj)
+    ] -> Error (Fmt.str "unsupported argument for last: %s" (Object.obj_type obj))
+  | ([] | _ :: _ :: _) as args ->
+    Error (Fmt.str "last requires 1 argument, got: %d" (List.length args))
+
+and eval_builtin_rest = function
+  | [ List [] ] -> Null
+  | [ List (_ :: t) ] -> List t
+  | [ (( Builtin _
+       | Error _
+       | Function _
+       | ReturnValue _
+       | Integer _
+       | String _
+       | True
+       | False
+       | Null ) as obj)
+    ] -> Error (Fmt.str "unsupported argument for rest: %s" (Object.obj_type obj))
+  | ([] | _ :: _ :: _) as args ->
+    Error (Fmt.str "rest requires 1 argument, got: %d" (List.length args))
+
+and eval_builtin_push = function
+  | [ List []; obj ] -> List [ obj ]
+  | [ List list; obj ] -> List (list @ [ obj ])
+  | [ (( Builtin _
+       | Error _
+       | Function _
+       | ReturnValue _
+       | Integer _
+       | String _
+       | True
+       | False
+       | Null ) as obj)
+    ; _
+    ] -> Error (Fmt.str "unsupported argument for push: %s" (Object.obj_type obj))
+  | ([] | [ _ ] | _ :: _ :: _ :: _) as args ->
+    Error (Fmt.str "push requires 2 argument, got: %d" (List.length args))
 ;;
 
 module Tests = struct
@@ -501,6 +599,7 @@ module Tests = struct
       ; "if (10 > 1) { if (10 > 1) { return true + false; } return 1; }"
       ; {| "Hello" + 15 |}
       ; "foobar"
+      ; "1[0]"
       ]
     in
     List.iter input ~f:test_eval;
@@ -516,6 +615,7 @@ module Tests = struct
       unknown operator: BOOL + BOOL
       type mismatch: STRING + INT
       identifier not found: foobar
+      Unsupported index operation on type: INT
       |}]
   ;;
 
@@ -600,17 +700,66 @@ module Tests = struct
   ;;
 
   let%expect_test "test builtin functions" =
-    let input = [ {| len("") |}; {| len("four") |}; {| len("Mazin"); |} ] in
+    let input =
+      [ {| len("") |}
+      ; {| len("four") |}
+      ; {| len("Mazin"); |}
+      ; "len([])"
+      ; "len([1, 2, 3])"
+      ; "first([1, 2, 3])"
+      ; "last([1, 2, 3])"
+      ; "first([2])"
+      ; "last([2])"
+      ; "first([])"
+      ; "last([])"
+      ; "rest([1, 2, 3, 4])"
+      ; "rest([1])"
+      ; "rest([])"
+      ; "push([], 1)"
+      ; "push([1], 2)"
+      ]
+    in
     List.iter input ~f:test_eval;
-    [%expect {|
+    [%expect
+      {|
       0
       4
       5
+      0
+      3
+      1
+      3
+      2
+      2
+      null
+      null
+      [2, 3, 4]
+      []
+      null
+      [1]
+      [1, 2]
       |}]
   ;;
 
   let%expect_test "test builtin function errors" =
-    let input = [ "len();"; "len(5);"; "len(true);"; {| len(5 + 5, "mazin"); |} ] in
+    let input =
+      [ "len();"
+      ; "len(5);"
+      ; "len(true);"
+      ; {| len(5 + 5, "mazin"); |}
+      ; "first(5)"
+      ; "last(5)"
+      ; "first(5, 6)"
+      ; "last(5, 6)"
+      ; "rest(5)"
+      ; "rest()"
+      ; "rest(5, 6)"
+      ; "push()"
+      ; "push([1])"
+      ; "push([1], 2, 3)"
+      ; "push(1, 2)"
+      ]
+    in
     List.iter input ~f:test_eval;
     [%expect
       {|
@@ -618,6 +767,38 @@ module Tests = struct
       unsupported argument for len: INT
       unsupported argument for len: BOOL
       len requires 1 argument, got: 2
+      unsupported argument for first: INT
+      unsupported argument for last: INT
+      first requires 1 argument, got: 2
+      last requires 1 argument, got: 2
+      unsupported argument for rest: INT
+      rest requires 1 argument, got: 0
+      rest requires 1 argument, got: 2
+      push requires 2 argument, got: 0
+      push requires 2 argument, got: 1
+      push requires 2 argument, got: 3
+      unsupported argument for push: INT
+      |}]
+  ;;
+
+  let%expect_test "test index expressions" =
+    let input =
+      [ {| [0, 1, 2][0] |}
+      ; {| [0, 1 + 1][1] |}
+      ; {| [0, 1 + 1][5] |}
+      ; {| [["Mazin"]][0][0] |}
+      ; {| ["Mazin"][0][4] |}
+      ; {| ["Mazin"][0][5] |}
+      ]
+    in
+    List.iter input ~f:test_eval;
+    [%expect {|
+      0
+      2
+      null
+      "Mazin"
+      "n"
+      null
       |}]
   ;;
 end

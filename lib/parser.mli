@@ -11,6 +11,7 @@ type precedence =
    | `PRODUCT
    | `PREFIX
    | `CALL
+   | `INDEX
    ]
   [@deriving show, ord])
 (* val errors : t -> string list *)
